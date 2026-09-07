@@ -124,6 +124,56 @@ namespace PlayerOffsets
     constexpr uintptr_t EffectiveFaith        = 0x2A4;
     constexpr uintptr_t EffectiveArcane       = 0x2A8;
 
+    // Wondrous Physick tear slots (EquipGameData from fromsoftware-rs).
+    // PlayerGameData.equipment is at 0x2B0 (OwnedPtr -> EquipGameData).
+    // EquipGameData field layout (all repr(C), offset-verified against the
+    // structs in fs-rs v0.14.0):
+    //   +0x00 vftable, +0x08 equipment_item_idx_list[22] (0x58), +0x60 unk60,
+    //   +0x68 unk68, +0x70 chr_asm (ChrAsm, 0xC8 bytes -> 0x138),
+    //   +0x138 equip_inventory_data (EquipInventoryData, 0xDC -> 0x214),
+    //   +0x214 equip_magic_data (ptr) -> 0x21C,
+    //   +0x21C equip_item_data (EquipItemData, 0xC8 -> 0x2E4),
+    //   +0x2E4 equip_gesture_data (ptr) -> 0x2EC,
+    //   +0x2EC item_replenish_state_tracker (ptr) -> 0x2F4,
+    //   +0x2F4 qm_item_backup_vector (ptr) -> 0x2FC,
+    //   +0x2FC equipment_entries (ChrAsmEquipEntries, 0x9C) -> 0x398,
+    //   +0x398 physick_tears[2], +0x3A0 extra_physick_tear.
+    // So PGD + 0x2B0 + 0x398 = 0x648 / 0x64C, extra at 0x650.
+    //   Status: LIKELY (layout-derived, not yet runtime-verified)
+    constexpr uintptr_t EquipGameDataOffset = 0x2B0;
+
+    constexpr uintptr_t PhysickTear1       = EquipGameDataOffset + 0x398;
+    constexpr uintptr_t PhysickTear2       = EquipGameDataOffset + 0x39C;
+    constexpr uintptr_t PhysickExtraTear   = EquipGameDataOffset + 0x3A0;
+    constexpr int PhysickSlotCount = 3;
+
+    // Vigor / FP resources. current_* and max_* u32 pairs validated against
+    // the fs-rs 1.16.2 repr(C) layout (field chain anchored at the VERIFIED
+    // attribute 0x3C): current_hp 0x10, current_max_hp 0x14, base_max_hp 0x18,
+    // current_fp 0x1C, current_max_fp 0x20, base_max_fp 0x24.
+    //   Status: VERIFIED (byte-exact with fs-rs; matches CE-observed layout)
+    constexpr uintptr_t CurrentHp          = 0x10;
+    constexpr uintptr_t CurrentMaxHp       = 0x14;
+    constexpr uintptr_t CurrentFp          = 0x1C;
+    constexpr uintptr_t CurrentMaxFp       = 0x20;
+
+    // Flask charges (max use counts) and heal potency. Charges at 0x101/0x102
+    // are the "EstusFlaskAllocateNum_byHp/byMp" fields read/written by TGA's
+    // in-game-tested "Add charge to flask" script. The potency fields match
+    // the fs-rs 1.16.2 repr(C) layout (hp_estus_rate 0x924 f32,
+    // hp_estus_additional 0x928 u8, fp_estus_rate 0x92C f32,
+    // fp_estus_additional 0x930 u8), consistent with the VERIFIED attribute chain.
+    //   Status: VERIFIED (charges: TGA CT; potency: fs-rs)
+    constexpr uintptr_t MaxHpFlask         = 0x101; // u8
+    constexpr uintptr_t MaxFpFlask         = 0x102; // u8
+    constexpr uintptr_t HpEstusRate        = 0x924; // f32
+    constexpr uintptr_t HpEstusAdditional  = 0x928; // u8
+    constexpr uintptr_t FpEstusRate        = 0x92C; // f32
+    constexpr uintptr_t FpEstusAdditional  = 0x930; // u8
+
+    constexpr int MaxFlaskCharges          = 14; // game cap (HP+FP combined)
+    constexpr int MaxFlaskLevel            = 12; // game cap (sacred tears)
+
     // ============================================================
     // WorldChrMan  -- LIKELY
     //   Source: fromsoftware-rs v0.14.0 world_chr_man.rs.
@@ -191,6 +241,22 @@ namespace PlayerOffsets
 
     // "Position within the current block." (16 bytes)
     constexpr uintptr_t PlayerInsBlockPosition = 0x6C0;
+
+    // ChrIns -> modules (OwnedPtr<ChrInsModuleContainer>). Container has
+    // data at +0x00 -> CSChrDataModule (the live stat module the HUD/fight
+    // reads HP/FP from). Located at unk18c field offset 0x190 in fs-rs.
+    //   Source: fromsoftware-rs v0.14.0 chr_ins.rs / chr_ins/module.rs
+    //   Status: LIKELY
+    constexpr uintptr_t ChrInsModules             = 0x190;
+    constexpr uintptr_t ChrInsModuleContainerData = 0x00;
+
+    // CSChrDataModule slots (all i32), the live resource module.
+    //   Source: fromsoftware-rs v0.14.0 chr_ins/module/data.rs
+    //   Status: LIKELY
+    constexpr uintptr_t ChrDataModuleHp        = 0x138;
+    constexpr uintptr_t ChrDataModuleMaxHp     = 0x13C;
+    constexpr uintptr_t ChrDataModuleFp        = 0x148;
+    constexpr uintptr_t ChrDataModuleMaxFp     = 0x14C;
 
     // "Current block ID the player is in."
     constexpr uintptr_t PlayerInsCurrentBlockId = 0x6D0;

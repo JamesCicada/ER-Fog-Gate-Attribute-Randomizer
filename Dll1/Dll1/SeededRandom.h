@@ -164,11 +164,12 @@ struct GateAttributeResult
 
 // Generates the deterministic attribute set for a gate.
 // Same (globalSeed, gateId) -> identical result on every launch.
+// maxAttributeByIndex[i] is the effective per-attribute cap for index i.
 inline GateAttributeResult ComputeGateResult(
     uint64_t globalSeed,
     const StableGateIdentity& gate,
     int minAttribute,
-    int maxAttribute) noexcept
+    const int* maxAttributeByIndex) noexcept
 {
     GateAttributeResult result;
 
@@ -180,7 +181,7 @@ inline GateAttributeResult ComputeGateResult(
     for (int i = 0; i < PlayerOffsets::AttributeCount; ++i)
     {
         result.attributes[i] =
-            rng.NextBounded(minAttribute, maxAttribute);
+            rng.NextBounded(minAttribute, maxAttributeByIndex[i]);
     }
 
     return result;
