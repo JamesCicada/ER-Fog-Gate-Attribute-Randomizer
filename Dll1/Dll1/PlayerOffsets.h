@@ -126,25 +126,35 @@ namespace PlayerOffsets
 
     // Wondrous Physick tear slots (EquipGameData from fromsoftware-rs).
     // PlayerGameData.equipment is at 0x2B0 (OwnedPtr -> EquipGameData).
-    // EquipGameData field layout (all repr(C), offset-verified against the
-    // structs in fs-rs v0.14.0):
-    //   +0x00 vftable, +0x08 equipment_item_idx_list[22] (0x58), +0x60 unk60,
-    //   +0x68 unk68, +0x70 chr_asm (ChrAsm, 0xC8 bytes -> 0x138),
-    //   +0x138 equip_inventory_data (EquipInventoryData, 0xDC -> 0x214),
-    //   +0x214 equip_magic_data (ptr) -> 0x21C,
-    //   +0x21C equip_item_data (EquipItemData, 0xC8 -> 0x2E4),
-    //   +0x2E4 equip_gesture_data (ptr) -> 0x2EC,
-    //   +0x2EC item_replenish_state_tracker (ptr) -> 0x2F4,
-    //   +0x2F4 qm_item_backup_vector (ptr) -> 0x2FC,
-    //   +0x2FC equipment_entries (ChrAsmEquipEntries, 0x9C) -> 0x398,
-    //   +0x398 physick_tears[2], +0x3A0 extra_physick_tear.
-    // So PGD + 0x2B0 + 0x398 = 0x648 / 0x64C, extra at 0x650.
+    // EquipGameData field layout (all repr(C); sizes re-derived from the
+    // fs-rs v0.14.0 structs and row by row below):
+    //   ChrAsm            = unk0(4)+unk4(4)+equipment(0x1C)+gaitem_handles
+    //                        [22*4=0x58]+equipment_param_ids[22*4=0x58]+
+    //                        unkd4(4)+unkd8(4)+bolt_loaded_states(0xC) = 0xE8
+    //   EquipInventoryData= vftable(8)+InventoryItemsData(0x78)+counts(4+4)+
+    //                        pot_items_count[16](0x40)+pot_items_capacity
+    //                        [16](0x40)+recent_items(0x10)+flags(1+1+1+1)+
+    //                        unk124(4) = 0x120
+    //   EquipItemData     = vftable(8)+quick_slots[10*8]+pouch_slots[6*8]+
+    //                        great_rune(8)+ptr(8)+ptr(8)+i32(4)+u32(4) = 0xA8
+    //   +0x00 vftable (8), +0x08 equipment_item_idx_list[22] (0x58),
+    //   +0x60 unk60 (8), +0x68 unk68 (4, pad to 0x70),
+    //   +0x70 chr_asm (ChrAsm, 0xE8 -> 0x158),
+    //   +0x158 equip_inventory_data (EquipInventoryData, 0x120 -> 0x278),
+    //   +0x278 equip_magic_data (ptr) -> 0x280,
+    //   +0x280 equip_item_data (EquipItemData, 0xA8 -> 0x328),
+    //   +0x328 equip_gesture_data (ptr) -> 0x330,
+    //   +0x330 item_replenish_state_tracker (ptr) -> 0x338,
+    //   +0x338 qm_item_backup_vector (ptr) -> 0x340,
+    //   +0x340 equipment_entries (ChrAsmEquipEntries, 0x9C) -> 0x3DC,
+    //   +0x3DC physick_tears[2], +0x3E4 extra_physick_tear.
+    // So PGD + 0x2B0 + 0x3DC = 0x68C / 0x690, extra at 0x694.
     //   Status: LIKELY (layout-derived, not yet runtime-verified)
     constexpr uintptr_t EquipGameDataOffset = 0x2B0;
 
-    constexpr uintptr_t PhysickTear1       = EquipGameDataOffset + 0x398;
-    constexpr uintptr_t PhysickTear2       = EquipGameDataOffset + 0x39C;
-    constexpr uintptr_t PhysickExtraTear   = EquipGameDataOffset + 0x3A0;
+    constexpr uintptr_t PhysickTear1       = EquipGameDataOffset + 0x3DC;
+    constexpr uintptr_t PhysickTear2       = EquipGameDataOffset + 0x3E0;
+    constexpr uintptr_t PhysickExtraTear   = EquipGameDataOffset + 0x3E4;
     constexpr int PhysickSlotCount = 3;
 
     // Vigor / FP resources. current_* and max_* u32 pairs validated against

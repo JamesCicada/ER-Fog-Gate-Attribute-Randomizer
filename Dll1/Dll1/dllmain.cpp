@@ -259,7 +259,7 @@ bool      g_flaskLevelReady = false;
 struct ModConfig
 {
     uint64_t globalSeed = 0x00C0FFEEULL;
-    bool enableFogGateDetection = true;
+    bool enableBossEncounterDetection = true;
     bool enableRuntimeApplication = false; // fail-closed by default
     bool enableBossDiagnostics = true;
     bool cacheInitialStats = true;
@@ -443,7 +443,7 @@ void WriteConfigDefaults(uint64_t seed)
         << "[Gate Detection]\n"
         << "\n"
         << "; Detect boss-fight activation (fog gate entry) to fire randomization.\n"
-        << "EnableFogGateDetection=1\n"
+        << "EnableBossEncounterDetection=1\n"
         << "\n"
         << "\n"
         << "[Stat Randomization]\n"
@@ -527,7 +527,7 @@ bool LoadConfig(ModConfig& config)
             "generating a random seed and writing defaults.");
 
         config.globalSeed = GenerateRandomSeed();
-        config.enableFogGateDetection = true;
+        config.enableBossEncounterDetection = true;
         config.enableRuntimeApplication = true;
         config.enableBossDiagnostics = true;
         config.cacheInitialStats = true;
@@ -588,8 +588,9 @@ bool LoadConfig(ModConfig& config)
             config.globalSeed = ParseU64(value);
             seedSeen = true;
         }
-        else if (key == "EnableFogGateDetection")
-            config.enableFogGateDetection = (ParseU64(value) != 0);
+        else if (key == "EnableBossEncounterDetection" ||
+                 key == "EnableFogGateDetection") // legacy name
+            config.enableBossEncounterDetection = (ParseU64(value) != 0);
         else if (key == "EnableRuntimeApplication")
             config.enableRuntimeApplication = (ParseU64(value) != 0);
         else if (key == "EnableBossDiagnostics")
@@ -697,8 +698,8 @@ bool LoadConfig(ModConfig& config)
         line << "Config loaded | GlobalSeed: "
             << std::dec
             << config.globalSeed
-            << " | EnableFogGateDetection: "
-            << (config.enableFogGateDetection ? "yes" : "no")
+            << " | EnableBossEncounterDetection: "
+            << (config.enableBossEncounterDetection ? "yes" : "no")
             << " | EnableRuntimeApplication: "
             << (config.enableRuntimeApplication ? "yes" : "no")
             << " | CacheInitialStats: "
@@ -1454,6 +1455,98 @@ uint8_t FlaskAdditionalForLevel(int level)
 }
 
 // ============================================================
+// Safe game-code invocation
+//
+// Game-side helper routines must NOT be called directly from our monitor
+// thread: they expect a pristine stack/register environment, and a wrong
+// resolved pointer must never be allowed to take down the game. This mirrors
+// Cheat Engine's executeCode/executeCodeEx - the routine runs on a dedicated
+// thread with its own large stack, and any access violation it raises is
+// swallowed instead of crashing the process.
+// ============================================================
+
+// True when `address` points into committed, readable memory. Guards every
+// deref of game-derived pointers (Prestaged addresses etc.) so a wrong offset
+// degrades to a skipped write instead of a crash.
+bool IsReadableAddress(uintptr_t address)
+{
+    if (address == 0)
+    {
+        return false;
+    }
+
+    MEMORY_BASIC_INFORMATION info = {};
+    if (VirtualQuery(
+            reinterpret_cast<LPCVOID>(address),
+            &info,
+            sizeof(info)) == 0)
+    {
+        return false;
+    }
+
+    if (info.State != MEM_COMMIT)
+    {
+        return false;
+    }
+
+    if ((info.Protect & 0xFF) == PAGE_NOACCESS ||
+        (info.Protect & PAGE_GUARD))
+    {
+        return false;
+    }
+
+    return true;
+}
+
+struct RunGameCallContext
+{
+    void (*fn)(void*);
+    void* param;
+};
+
+DWORD WINAPI RunGameCallProc(LPVOID raw)
+{
+    RunGameCallContext* ctx = static_cast<RunGameCallContext*>(raw);
+
+    __try
+    {
+        ctx->fn(ctx->param);
+    }
+    __except (1)
+    {
+    }
+
+    delete ctx;
+    return 0;
+}
+
+// Runs `fn(param)` on a fresh thread with a dedicated large stack (like CE's
+// executeCode) and returns once it finishes, or after a timeout so a wedged
+// routine can never stall the monitor loop. Any fault inside `fn` is contained
+// by the worker's SEH frame. `fn` must free `param` before returning.
+void RunGameCall(void (*fn)(void*), void* param)
+{
+    RunGameCallContext* ctx = new RunGameCallContext{ fn, param };
+
+    HANDLE thread = CreateThread(
+        nullptr,
+        0x0D0000, // dedicated stack
+        RunGameCallProc,
+        ctx,
+        0,
+        nullptr);
+
+    if (!thread)
+    {
+        delete ctx;
+        return;
+    }
+
+    WaitForSingleObject(thread, 2000);
+    CloseHandle(thread);
+}
+
+// ============================================================
 // Flask level (item-id + bonfire-level byte, TGA "Set flask level")
 //
 // The in-game flask "+X" value is encoded in the flask ITEM ids and a
@@ -1468,7 +1561,8 @@ constexpr int kFlaskItemPhysickBase = 1050;    // Wondrous Physick item variants
 
 int ReadTotalBonfireLevel()
 {
-    if (!g_totalBonfireLevelAddr)
+    if (!g_totalBonfireLevelAddr ||
+        !IsReadableAddress(g_totalBonfireLevelAddr))
     {
         return 0;
     }
@@ -1485,6 +1579,8 @@ void ExecuteActivateBonfire(int bonfireLevel)
         return;
     }
 
+    // Body only - must be called on the dedicated game-call thread
+    // (see UpdateFlaskLevelCall), never directly from the monitor thread.
     typedef void(__fastcall* ActivateBonfireFn)(int);
 
     ActivateBonfireFn activate =
@@ -1504,6 +1600,7 @@ void ExecuteReplaceTool(
     }
 
     // executeCodeEx(0, 100, addr, EquipGameData, currentId, replaceId, 1)
+    // Body only - must be called on the dedicated game-call thread.
     typedef void(__fastcall* ReplaceToolFn)(
         uintptr_t, int, int, int);
 
@@ -1513,15 +1610,48 @@ void ExecuteReplaceTool(
     replace(equipGameData, currentId, replaceId, 1);
 }
 
-uintptr_t EquipGameDataFor(uintptr_t playerGameData)
+struct UpdateFlaskLevelArgs
 {
-    if (!playerGameData)
+    uintptr_t playerGameData;
+    int currentBonfireLevel;
+    int newBonfireLevel;
+};
+
+// Runs on the dedicated game-call thread (via RunGameCall). All reads and the
+// ReplaceTool/ActivateBonfire calls execute inside the worker's SEH frame, so
+// a bad resolved pointer can never crash the game.
+void UpdateFlaskLevelCall(void* raw)
+{
+    UpdateFlaskLevelArgs* args = static_cast<UpdateFlaskLevelArgs*>(raw);
+
+    uintptr_t equipGameData = *reinterpret_cast<uintptr_t*>(
+        args->playerGameData + PlayerOffsets::EquipGameDataOffset);
+
+    if (equipGameData)
     {
-        return 0;
+        const int flaskBases[4] = {
+            kFlaskItemCrimsonBase,
+            kFlaskItemCeruleanBase,
+            kFlaskItemPhysickBase,
+            kFlaskItemPhysickBase + 1,
+        };
+
+        // oldItem/newItem are the item ids the current/next flask level maps to.
+        for (int i = 0; i < 4; ++i)
+        {
+            int newItem = flaskBases[i] + (args->newBonfireLevel - 1) * 2;
+            int oldItem = flaskBases[i] + (args->currentBonfireLevel - 1) * 2;
+
+            if (oldItem != newItem)
+            {
+                ExecuteReplaceTool(equipGameData, oldItem, newItem);
+            }
+        }
+
+        ExecuteActivateBonfire(args->newBonfireLevel);
     }
 
-    return *reinterpret_cast<uintptr_t*>(
-        playerGameData + PlayerOffsets::EquipGameDataOffset);
+    delete args;
 }
 
 // Swaps the four flask item ids from the level encoded by currentBonfireLevel
@@ -1544,33 +1674,13 @@ void UpdateFlaskLevel(
         return;
     }
 
-    uintptr_t equipGameData = EquipGameDataFor(playerGameData);
-
-    if (!equipGameData)
-    {
-        return;
-    }
-
-    const int flaskBases[4] = {
-        kFlaskItemCrimsonBase,
-        kFlaskItemCeruleanBase,
-        kFlaskItemPhysickBase,
-        kFlaskItemPhysickBase + 1,
+    UpdateFlaskLevelArgs* args = new UpdateFlaskLevelArgs{
+        playerGameData,
+        currentBonfireLevel,
+        newBonfireLevel,
     };
 
-    // oldItem/newItem are the item ids the current/next flask level maps to.
-    for (int i = 0; i < 4; ++i)
-    {
-        int newItem = flaskBases[i] + (newBonfireLevel - 1) * 2;
-        int oldItem = flaskBases[i] + (currentBonfireLevel - 1) * 2;
-
-        if (oldItem != newItem)
-        {
-            ExecuteReplaceTool(equipGameData, oldItem, newItem);
-        }
-    }
-
-    ExecuteActivateBonfire(newBonfireLevel);
+    RunGameCall(&UpdateFlaskLevelCall, args);
 }
 
 // ============================================================
@@ -1665,6 +1775,31 @@ bool PickPhysickTears(
 // Flask charges
 // ============================================================
 
+struct EstusAllocationArgs
+{
+    int hp;
+    int fp;
+};
+
+// Runs on the dedicated game-call thread (via RunGameCall). Same technique as
+// TGA's "Add charge to flask" script (executeCodeEx) so the new counters are
+// applied to the live flask state.
+void EstusAllocationCall(void* raw)
+{
+    EstusAllocationArgs* args = static_cast<EstusAllocationArgs*>(raw);
+
+    // Signature: void(int flaskType, int count). 0 = HP flask, 1 = FP flask.
+    typedef int(__fastcall* EstusAllocationUpdateFn)(int, int);
+
+    EstusAllocationUpdateFn apply =
+        reinterpret_cast<EstusAllocationUpdateFn>(g_estusAllocationUpdate);
+
+    apply(0, args->hp);
+    apply(1, args->fp);
+
+    delete args;
+}
+
 // Writes the allocated flask charge counts. The byte fields (PlayerGameData+
 // 0x101/0x102, VERIFIED) are the "allocated at grace" persistants; the engine
 // update routine below additionally applies them to the live flask counters so
@@ -1690,14 +1825,12 @@ void WriteFlaskCharges(
         return;
     }
 
-    // Signature: void(int flaskType, int count). 0 = HP flask, 1 = FP flask.
-    typedef int(__fastcall* EstusAllocationUpdateFn)(int, int);
+    EstusAllocationArgs* estus = new EstusAllocationArgs{
+        static_cast<int>(hpCharges),
+        static_cast<int>(fpCharges),
+    };
 
-    EstusAllocationUpdateFn apply =
-        reinterpret_cast<EstusAllocationUpdateFn>(g_estusAllocationUpdate);
-
-    apply(0, static_cast<int>(hpCharges));
-    apply(1, static_cast<int>(fpCharges));
+    RunGameCall(&EstusAllocationCall, estus);
 }
 
 uintptr_t StatBaseForGameDataMan(uintptr_t gameDataMan)
@@ -1738,15 +1871,24 @@ void FillPlayerResources(
 
         if (chrIns)
         {
-            uintptr_t container = *reinterpret_cast<uintptr_t*>(
-                chrIns + PlayerOffsets::ChrInsModules);
-
-            uintptr_t dataModule = container
+            uintptr_t container = IsReadableAddress(
+                chrIns + PlayerOffsets::ChrInsModules)
                 ? *reinterpret_cast<uintptr_t*>(
-                    container + PlayerOffsets::ChrInsModuleContainerData)
+                    chrIns + PlayerOffsets::ChrInsModules)
                 : 0;
 
-            if (dataModule)
+            uintptr_t dataModule = 0;
+
+            if (container &&
+                IsReadableAddress(
+                    container + PlayerOffsets::ChrInsModuleContainerData))
+            {
+                dataModule = *reinterpret_cast<uintptr_t*>(
+                    container + PlayerOffsets::ChrInsModuleContainerData);
+            }
+
+            if (dataModule &&
+                IsReadableAddress(dataModule + PlayerOffsets::ChrDataModuleMaxHp))
             {
                 uint32_t moduleMaxHp = *reinterpret_cast<uint32_t*>(
                     dataModule + PlayerOffsets::ChrDataModuleMaxHp);
@@ -1778,15 +1920,24 @@ void FillPlayerResources(
 
         if (chrIns)
         {
-            uintptr_t container = *reinterpret_cast<uintptr_t*>(
-                chrIns + PlayerOffsets::ChrInsModules);
-
-            uintptr_t dataModule = container
+            uintptr_t container = IsReadableAddress(
+                chrIns + PlayerOffsets::ChrInsModules)
                 ? *reinterpret_cast<uintptr_t*>(
-                    container + PlayerOffsets::ChrInsModuleContainerData)
+                    chrIns + PlayerOffsets::ChrInsModules)
                 : 0;
 
-            if (dataModule)
+            uintptr_t dataModule = 0;
+
+            if (container &&
+                IsReadableAddress(
+                    container + PlayerOffsets::ChrInsModuleContainerData))
+            {
+                dataModule = *reinterpret_cast<uintptr_t*>(
+                    container + PlayerOffsets::ChrInsModuleContainerData);
+            }
+
+            if (dataModule &&
+                IsReadableAddress(dataModule + PlayerOffsets::ChrDataModuleMaxFp))
             {
                 uint32_t moduleMaxFp = *reinterpret_cast<uint32_t*>(
                     dataModule + PlayerOffsets::ChrDataModuleMaxFp);
@@ -2935,7 +3086,7 @@ DWORD WINAPI MainThread(LPVOID)
                 player,
                 bossFightActive,
                 bossNpcParamId,
-                config.enableFogGateDetection
+config.enableBossEncounterDetection
             );
 
         // Diagnostic: log any change to the raw boss-fight fields (from the
