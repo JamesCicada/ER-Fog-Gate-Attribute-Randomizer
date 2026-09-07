@@ -276,8 +276,9 @@ struct ModConfig
         99, 99, 99, 99, 99, 99, 99, 99
     };
 
-    bool  randomizeFlaskCharges = true;
-    bool  randomizeFlaskLevel = true;
+    // Optional flask randomizations - OFF by default; the player opts in.
+    bool  randomizeFlaskCharges = false;
+    bool  randomizeFlaskLevel = false;
     int   minFlaskCharges = 2; // combined HP+FP total range during fights
     int   maxFlaskCharges = 14; // game cap is 14 combined
     int   minFlaskLevel = 1;
@@ -478,9 +479,10 @@ void WriteConfigDefaults(uint64_t seed)
         << "[Flask Randomization]\n"
         << "\n"
         << "; Randomize your flask loadout during boss fights. Charges and recovery\n"
-        << "; are deterministic per boss. Both are restored when the fight ends.\n"
-        << "RandomizeFlaskCharges=1\n"
-        << "RandomizeFlaskLevel=1\n"
+        << "; are deterministic per boss and restored when the fight ends.\n"
+        << "; OFF by default (optional).\n"
+        << "RandomizeFlaskCharges=0\n"
+        << "RandomizeFlaskLevel=0\n"
         << "\n"
         << "; Charge range as a COMBINED total (Crimson + Cerulean charges together).\n"
         << "; The game's cap is 14 total. 0 is allowed (no flasks at all - hard mode).\n"
@@ -542,8 +544,8 @@ bool LoadConfig(ModConfig& config)
             config.maxAttributeByIndex[i] = 99;
         }
 
-        config.randomizeFlaskCharges = true;
-        config.randomizeFlaskLevel = true;
+        config.randomizeFlaskCharges = false;
+        config.randomizeFlaskLevel = false;
         config.minFlaskCharges = 2;
         config.maxFlaskCharges = 14;
         config.minFlaskLevel = 1;
